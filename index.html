@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BENI HAND MOTION 3D V3</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#02040d;color:white;font-family:Arial;overflow:hidden}
+canvas{width:100vw;height:100vh;display:block}
+header{position:absolute;top:12px;width:100%;text-align:center;pointer-events:none}
+h1{margin:0;color:#76eaff;letter-spacing:2px;font-size:clamp(19px,4vw,30px);text-shadow:0 0 18px #00bfff}
+header p{font-size:10px;color:#b2c9e8}
+
+/* Kamera: tanpa bingkai, tepi lembut menyatu dengan latar */
+#cameraBox{position:absolute;right:12px;top:83px;width:120px;opacity:.85}
+video{width:100%;display:block;transform:scaleX(-1);border-radius:16px;
+ -webkit-mask-image:radial-gradient(ellipse at center,#000 62%,transparent 100%);
+ mask-image:radial-gradient(ellipse at center,#000 62%,transparent 100%)}
+#camLabel{font-size:9px;text-align:center;padding:4px;color:#8ceaff;text-shadow:0 0 8px #000}
+
+/* Kontrol melayang di bawah, tanpa panel/kotak */
+.controls{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);
+ width:min(94%,640px);text-align:center;pointer-events:none}
+#status{font-size:13px;color:#8ceaff;margin-bottom:8px;text-shadow:0 0 10px #000,0 0 14px #00bfff66}
+.grid{display:flex;flex-wrap:wrap;justify-content:center;gap:2px 4px}
+.grid button{pointer-events:auto;background:transparent;border:none;border-radius:999px;
+ padding:7px 9px;color:#d6e6fa;font-size:11px;cursor:pointer;
+ text-shadow:0 0 8px #000;transition:.2s}
+.grid button:hover{background:#66eaff1f;color:#fff}
+.grid button.active{background:#66eaff2e;color:#fff;text-shadow:0 0 10px #66eaff}
+
+/* Tombol kamera di pojok kanan bawah */
+#start{position:absolute;right:14px;bottom:14px;z-index:5;border:none;border-radius:999px;
+ padding:11px 16px;background:linear-gradient(135deg,#0a7fb0cc,#6a4dffcc);
+ color:#fff;font-size:12px;font-weight:bold;cursor:pointer;
+ box-shadow:0 0 18px #3fd0ff66}
+#start:hover{box-shadow:0 0 26px #3fd0ffaa}
+#start:disabled{opacity:.7;cursor:default}
+
+@media(max-width:700px){
+ .controls{bottom:62px}
+ .grid button{font-size:10px;padding:6px 7px}
+ #cameraBox{width:90px}
+}
+</style>
+</head>
+
+<body>
+<header>
+<h1>BENI HAND MOTION 3D</h1>
+<p>HAND GESTURE · GALAXY · SOLAR SYSTEM · HEART NEBULA</p>
+</header>
+
+<canvas id="space"></canvas>
+
+<div id="cameraBox">
+<video id="video" autoplay playsinline muted></video>
+<div id="camLabel">KAMERA BELUM AKTIF</div>
+</div>
+
+<button id="start" onclick="startCamera()">📷 Aktifkan Kamera</button>
+
+<div class="controls">
+<div id="status">🌌 Siap — aktifkan kamera</div>
+<div class="grid">
+<button data-mode="fist" onclick="manual('fist')">✊ Kepal</button>
+<button data-mode="one" onclick="manual('one')">☝️ 1 jari</button>
+<button data-mode="two" onclick="manual('two')">✌️ 2 jari</button>
+<button data-mode="three" onclick="manual('three')">🤟 3 jari</button>
+<button data-mode="four" onclick="manual('four')">🖖 4 jari</button>
+<button data-mode="open" onclick="manual('open')">🖐️ 5 jari</button>
+<button data-mode="heart" onclick="manual('heart')">❤️ Hati</button>
+<button data-mode="sun" onclick="manual('sun')">☀️ Matahari</button>
+<button onclick="togglePause()" id="pause">⏸ Jeda</button>
+<button onclick="fullScreen()">⛶ Layar penuh</button>
+</div>
+</div>
+
+<script>
+const canvas=document.getElementById("space");
+const ctx=canvas.getContext("2d");
+const video=document.getElementById("video");
+const statusEl=document.getElementById("status");
+const camLabel=document.getElementById("camLabel");
+
+let W,H,cx,cy,t=0,speed=1,paused=false;
+let mode="open",handX=0,detector=null,camera=null;
+let lastAutoMode="",manualMode=false,missing=0;
+let stars=[],particles=[],heartPoints=[];
+
+const descriptions={
+ fist:"✊ Galaksi berkumpul",
+ one:"☝️ Satu jari — orbit planet",
+ two:"✌️ Dua jari — matahari bercahaya",
+ three:"🤟 Tiga jari — galaksi energi",
+ four:"🖖 Empat jari — orbit diperluas",
+ open:"🖐️ Lima jari — tata surya terbuka",
+ heart:"❤️ HEART NEBULA — bintang membentuk hati",
+ sun:"☀️ Mode Matahari"
+};
+
+function setMode(m){
+ mode=m;
+ statusEl.textContent=descriptions[m]||m;
+ document.querySelectorAll(".grid button[data-mode]").forEach(b=>
+  b.classList.toggle("active",b.dataset.mode===m));
+}
+
+function manual(m){
+ manualMode=true;
+ setMode(m);
+}
+
+function resize(){
+ const dpr=Math.min(devicePixelRatio||1,2);
+ W=innerWidth;H=innerHeight;cx=W/2;cy=H/2;
+ canvas.width=W*dpr;canvas.height=H*dpr;
+ ctx.setTransform(dpr,0,0,dpr,0,0);
+
+ stars=Array.from({length:230},()=>({
+  x:Math.random()*W,y:Math.random()*H,
+  r:Math.random()*1.5+.2,
+  a:Math.random()*6,v:.15+Math.random()*.7
+ }));
+
+ particles=Array.from({length:850},()=>({
+  a:Math.random()*Math.PI*2,r:Math.random(),
+  size:.4+Math.random()*1.8,
+  color:["#ffffff","#65dfff","#b39aff","#ffb8e6","#ffcb79"][Math.floor(Math.random()*5)],
+  phase:Math.random()*6
+ }));
+
+ // Bintang kecil tersusun rapi: garis tepi hati + lapisan isian yang mengecil ke tengah.
+ heartPoints=[];
+ const layers=[[1,150],[.86,110],[.72,80],[.58,56],[.44,36],[.3,20],[.16,9]];
+ const palette=["#ffffff","#ff75c8","#ffb8e6","#79eaff"];
+ layers.forEach(([k,n],li)=>{
+  for(let i=0;i<n;i++){
+   heartPoints.push({
+    a:i/n*Math.PI*2+li*.21,
+    k,
+    r:(k===1?.26:.2)+Math.random()*.1,
+    color:palette[Math.floor(Math.random()*palette.length)],
+    phase:Math.random()*6
+   });
+  }
+ });
+}
+window.addEventListener("resize",resize);
+
+function dot(x,y,r,color,glow=0){
+ ctx.save();
+ ctx.globalAlpha=1;
+ ctx.shadowBlur=glow;
+ ctx.shadowColor=color;
+ ctx.fillStyle=color;
+ ctx.beginPath();
+ ctx.arc(x,y,Math.max(.2,r),0,Math.PI*2);
+ ctx.fill();
+ ctx.restore();
+}
+
+// Bintang kecil berujung empat (✦), dipakai untuk bentuk hati.
+function drawStar(x,y,r,color,glow=0,alpha=1){
+ ctx.save();
+ ctx.globalAlpha=alpha;
+ ctx.shadowBlur=glow;
+ ctx.shadowColor=color;
+ ctx.fillStyle=color;
+ ctx.beginPath();
+ for(let i=0;i<8;i++){
+  const ang=i*Math.PI/4-Math.PI/2;
+  const rad=i%2===0?r:r*.38;
+  const px=x+Math.cos(ang)*rad,py=y+Math.sin(ang)*rad;
+  if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);
+ }
+ ctx.closePath();
+ ctx.fill();
+ ctx.restore();
+}
+
+function background(){
+ const g=ctx.createRadialGradient(cx,cy,5,cx,cy,Math.max(W,H)*.75);
+ g.addColorStop(0,"#101d3b");
+ g.addColorStop(1,"#02040c");
+ ctx.fillStyle=g;
+ ctx.fillRect(0,0,W,H);
+
+ for(const s of stars){
+  dot(s.x,s.y,s.r,
+   `rgba(200,225,255,${.3+.6*(Math.sin(s.a)+1)/2})`);
+  if(!paused){
+   s.a+=.025;
+   s.y+=s.v*.12;
+   if(s.y>H){s.y=0;s.x=Math.random()*W}
+  }
+ }
+}
+
+function drawGalaxy(){
+ const scale=Math.min(W/650,H/650,1);
+ ctx.save();
+ ctx.translate(cx,cy);
+ ctx.scale(scale,scale);
+
+ for(const p of particles){
+  let a=p.a+t*.002*speed*(1-p.r);
+  let r=p.r*(mode==="fist"?110:220);
+
+  if(mode==="three")r*=1.25;
+  if(mode==="four")r*=1.45;
+
+  const x=Math.cos(a+p.r*4)*r;
+  const y=Math.sin(a+p.r*4)*r*.52;
+  dot(x,y,p.size,p.color,mode==="fist"?5:2);
+ }
+ ctx.restore();
+}
+
+const planets=[
+ {name:"MERKURIUS",c:"#bdc8d5",r:43,s:4,v:.035},
+ {name:"VENUS",c:"#ffc080",r:70,s:6,v:.024},
+ {name:"BUMI",c:"#4caaff",r:102,s:7,v:.017},
+ {name:"MARS",c:"#ff785f",r:135,s:5,v:.013},
+ {name:"JUPITER",c:"#e8c39e",r:173,s:11,v:.009},
+ {name:"SATURNUS",c:"#eed79a",r:214,s:9,v:.007}
+];
+
+function drawSolar(){
+ const scale=Math.min(W/650,H/620,1);
+ ctx.save();
+ ctx.translate(cx,cy);
+ ctx.scale(scale,scale);
+
+ planets.forEach((p,i)=>{
+  let spread=mode==="open"?1.22:
+             mode==="four"?1.12:1;
+  if(mode==="fist")spread=.83;
+  const r=p.r*spread;
+
+  ctx.beginPath();
+  ctx.ellipse(0,0,r,r*.66,0,0,Math.PI*2);
+  ctx.strokeStyle=mode==="one"?"#6deaff99":"#829ab52d";
+  ctx.lineWidth=mode==="one"?1.7:1;
+  ctx.stroke();
+
+  const angle=t*p.v*speed+i*1.15+handX*.8;
+  const x=Math.cos(angle)*r;
+  const y=Math.sin(angle)*r*.66;
+
+  if(p.name==="SATURNUS"){
+   ctx.save();ctx.translate(x,y);ctx.rotate(-.25);
+   ctx.beginPath();ctx.ellipse(0,0,p.s*1.8,p.s*.7,0,0,Math.PI*2);
+   ctx.strokeStyle="#f5d9a5";ctx.lineWidth=3;ctx.stroke();
+   ctx.restore();
+  }
+
+  dot(x,y,p.s,p.c,mode==="one"?22:9);
+
+  if(mode==="open"){
+   ctx.font="9px Arial";
+   ctx.textAlign="center";
+   ctx.fillStyle="#d6e6fa";
+   ctx.fillText(p.name,x,y+p.s+14);
+  }
+ });
+ ctx.restore();
+}
+
+function drawSun(){
+ const r=(mode==="two"||mode==="sun"?37:24)*
+          (1+Math.sin(t*.04)*.05);
+ const g=ctx.createRadialGradient(cx,cy,1,cx,cy,r*4);
+ g.addColorStop(0,"#fffbd8");
+ g.addColorStop(.18,"#ffcf61");
+ g.addColorStop(.48,"#ff853333");
+ g.addColorStop(1,"#ff853300");
+ ctx.fillStyle=g;
+ ctx.beginPath();ctx.arc(cx,cy,r*4,0,Math.PI*2);ctx.fill();
+ dot(cx,cy,r,"#ffdf7e",35);
+ dot(cx,cy,r*.62,"#fff8d7",18);
+}
+
+function drawHeart(){
+ const scale=Math.min(W/650,H/700,1);
+ const size=Math.min(W*.34,190)*scale*1.6;
+ const centerY=cy-12;
+
+ const halo=ctx.createRadialGradient(cx,centerY,2,cx,centerY,size*1.8);
+ halo.addColorStop(0,"#ff4cb932");
+ halo.addColorStop(1,"#ff4cb900");
+ ctx.fillStyle=halo;
+ ctx.fillRect(cx-size*2,centerY-size*2,size*4,size*4);
+
+ ctx.save();
+ ctx.translate(cx,centerY);
+ ctx.scale(size/17,size/17);
+
+ heartPoints.forEach(p=>{
+  const a=p.a;
+  const x=16*Math.pow(Math.sin(a),3);
+  const y=13*Math.cos(a)-5*Math.cos(2*a)
+          -2*Math.cos(3*a)-Math.cos(4*a);
+
+  let px=x,py=-y;
+
+  // Sebagian bintang mengisi bagian dalam bentuk hati.
+  px*=p.k;
+  py*=p.k;
+
+  px+=Math.sin(t*.035+p.phase)*.1;
+  py+=Math.cos(t*.03+p.phase)*.1;
+
+  const twinkle=.55+.45*Math.sin(t*.05+p.phase);
+  drawStar(px,py,p.r*(.85+.3*twinkle),p.color,4+4*twinkle,.5+.5*twinkle);
+ });
+ ctx.restore();
+
+ ctx.textAlign="center";
+ ctx.font="bold 15px Arial";
+ ctx.fillStyle="#ffc5ed";
+ ctx.shadowBlur=18;ctx.shadowColor="#ff48bb";
+ ctx.fillText("HEART NEBULA",cx,centerY+size+28);
+ ctx.shadowBlur=0;
+}
+
+function animate(){
+ requestAnimationFrame(animate);
+ ctx.clearRect(0,0,W,H);
+ background();
+ if(!paused)t++;
+
+ if(mode==="heart"){
+  drawHeart();
+ }else{
+  drawGalaxy();
+  drawSolar();
+  drawSun();
+ }
+}
+function togglePause(){
+ paused=!paused;
+ document.getElementById("pause").textContent=
+ paused?"▶ Lanjut":"⏸ Jeda";
+}
+function fullScreen(){
+ if(!document.fullscreenElement)
+  document.documentElement.requestFullscreen?.();
+ else document.exitFullscreen?.();
+}
+
+// Deteksi ruas jari yang bersilangan dalam gambar kamera.
+function segmentsCross(a,b,c,d){
+ const orient=(p,q,r)=>(q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x);
+ const o1=orient(a,b,c),o2=orient(a,b,d);
+ const o3=orient(c,d,a),o4=orient(c,d,b);
+ return o1*o2<0&&o3*o4<0;
+}
+
+function distance(a,b){
+ return Math.hypot(a.x-b.x,a.y-b.y);
+}
+
+function fingerCount(lm){
+ let n=0;
+ // Empat jari utama.
+ if(lm[8].y<lm[6].y)n++;
+ if(lm[12].y<lm[10].y)n++;
+ if(lm[16].y<lm[14].y)n++;
+ if(lm[20].y<lm[18].y)n++;
+
+ // Ibu jari: periksa apakah ujung menjauh dari telapak.
+ if(distance(lm[4],lm[0])>
+    distance(lm[3],lm[0])*1.12)n++;
+
+ return n;
+}
+
+function onResults(results){
+ const hands=results.multiHandLandmarks;
+
+ if(!hands||!hands.length){
+  missing++;
+  camLabel.textContent="TANGAN TIDAK TERDETEKSI";
+  if(missing>5&&!manualMode){
+   lastAutoMode="";
+  }
+  return;
+ }
+ missing=0;
+
+ const lm=hands[0];
+ const count=fingerCount(lm);
+
+ // Pendeteksian silang menggunakan ruas ibu jari dan telunjuk.
+ const crossed=segmentsCross(lm[2],lm[4],lm[5],lm[8]);
+ const tipsNear=distance(lm[4],lm[8])<.20;
+
+ // Gesture silang didahulukan daripada hitungan jari.
+ let detected;
+ if(crossed&&tipsNear){
+  detected="heart";
+ }else if(count===0){
+  detected="fist";
+ }else if(count===1){
+  detected="one";
+ }else if(count===2){
+  detected="two";
+ }else if(count===3){
+  detected="three";
+ }else if(count===4){
+  detected="four";
+ }else{
+  detected="open";
+ }
+
+ handX=(.5-lm[9].x)*1.5;
+ camLabel.textContent="TERDETEKSI: "+count+" JARI";
+
+ // Setelah kamera aktif, gestur tangan mengambil alih tombol demo.
+ manualMode=false;
+
+ if(detected!==lastAutoMode){
+  lastAutoMode=detected;
+  setMode(detected);
+ }
+}
+
+async function startCamera(){
+ const btn=document.getElementById("start");
+ btn.disabled=true;
+ btn.textContent="Memuat model AI...";
+
+ try{
+  if(!navigator.mediaDevices?.getUserMedia){
+   throw new Error("Buka melalui localhost menggunakan Live Server.");
+  }
+
+  detector=new Hands({
+   locateFile:file=>
+    "https://cdn.jsdelivr.net/npm/@mediapipe/hands/"+file
+  });
+
+  detector.setOptions({
+   maxNumHands:1,
+   modelComplexity:1,
+   minDetectionConfidence:.65,
+   minTrackingConfidence:.6
+  });
+
+  detector.onResults(onResults);
+
+  camera=new Camera(video,{
+   onFrame:async()=>{
+    if(detector&&video.readyState>=2){
+     await detector.send({image:video});
+    }
+   },
+   width:640,height:480
+  });
+
+  await camera.start();
+  btn.textContent="📷 Kamera Aktif";
+  camLabel.textContent="KAMERA AKTIF";
+  statusEl.textContent="Tunjukkan gestur tangan ke kamera";
+ }catch(err){
+  console.error(err);
+  statusEl.textContent="Kamera gagal: "+err.message;
+  btn.disabled=false;
+  btn.textContent="Coba lagi";
+ }
+}
+
+resize();
+setMode("open");
+animate();
+</script>
+</body>
+</html>
